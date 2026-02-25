@@ -30,6 +30,7 @@ use std::os::unix::fs::PermissionsExt;
 mod docx_tool;
 mod pdf_tool;
 mod xlsx_tool;
+mod security;
 
 mod platform;
 use platform::{create_system_automation, SystemAutomation};
@@ -520,7 +521,19 @@ impl ComputerControllerServer {
             tool_router: Self::tool_router(),
             cache_dir,
             active_resources: Arc::new(Mutex::new(HashMap::new())),
-            http_client: Client::builder().user_agent("goose/1.0").build().unwrap(),
+            http_client: Client::builder()
+                .user_agent("goose/1.0")
+                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                    let url = attempt.url();
+                    if security::is_url_safe_sync(url) {
+                        attempt.follow()
+                    } else {
+                        tracing::warn!("Blocking unsafe redirect to: {}", url);
+                        attempt.stop()
+                    }
+                }))
+                .build()
+                .unwrap(),
             instructions,
             system_automation,
             #[cfg(target_os = "macos")]
@@ -592,13 +605,30 @@ impl ComputerControllerServer {
         params: Parameters<WebScrapeParams>,
     ) -> Result<CallToolResult, ErrorData> {
         let params = params.0;
-        let url = &params.url;
+        let url_str = &params.url;
         let save_as = params.save_as;
+
+        let url = Url::parse(url_str).map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("Invalid URL: {}", e),
+                None,
+            )
+        })?;
+
+        // Basic SSRF protection
+        if !security::is_url_safe(&url).await {
+            return Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "URL is not allowed for security reasons".to_string(),
+                None,
+            ));
+        }
 
         // Fetch the content
         let response = self
             .http_client
-            .get(url)
+            .get(url.clone())
             .header("Accept", "text/markdown, */*")
             .send()
             .await
