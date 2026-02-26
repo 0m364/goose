@@ -37,8 +37,8 @@ pub async fn run() -> Result<()> {
 
     let settings = configuration::Settings::new()?;
 
-    let secret_key =
-        std::env::var("GOOSE_SERVER__SECRET_KEY").unwrap_or_else(|_| "test".to_string());
+    let secret_key = std::env::var("GOOSE_SERVER__SECRET_KEY")
+        .map_err(|_| anyhow::anyhow!("GOOSE_SERVER__SECRET_KEY environment variable must be set"))?;
 
     let app_state = state::AppState::new().await?;
 
