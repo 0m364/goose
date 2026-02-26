@@ -590,3 +590,33 @@ pub async fn emit_event(
 
     client.capture(event).await.map_err(|e| format!("{:?}", e))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::classify_error;
+    use test_case::test_case;
+
+    #[test_case("Network connection lost", "network_error"; "network error")]
+    #[test_case("Fetch failed", "network_error"; "fetch error")]
+    #[test_case("Request timeout", "timeout"; "timeout error")]
+    #[test_case("Rate limit exceeded", "rate_limit"; "rate limit error")]
+    #[test_case("Unauthorized access", "auth_error"; "unauthorized error")]
+    #[test_case("401 Unauthorized", "auth_error"; "401 error")]
+    #[test_case("Permission denied", "permission_error"; "permission denied error")]
+    #[test_case("403 Forbidden", "permission_error"; "403 error")]
+    #[test_case("Resource not found", "not_found"; "resource not found error")]
+    #[test_case("404 Not Found", "not_found"; "404 error")]
+    #[test_case("Provider internal error", "provider_error"; "provider error")]
+    #[test_case("Invalid config", "config_error"; "config error")]
+    #[test_case("Extension crashed", "extension_error"; "extension error")]
+    #[test_case("Database connection failed", "database_error"; "database error")]
+    #[test_case("SQL syntax error", "database_error"; "sql error")]
+    #[test_case("Migration failed", "migration_error"; "migration error")]
+    #[test_case("React render error", "render_error"; "react error")]
+    #[test_case("Chunk load error", "module_error"; "chunk error")]
+    #[test_case("Some random error", "unknown_error"; "unknown error")]
+    #[test_case("NETWORK ERROR", "network_error"; "uppercase network error")]
+    fn test_classify_error(error: &str, expected: &str) {
+        assert_eq!(classify_error(error), expected);
+    }
+}
