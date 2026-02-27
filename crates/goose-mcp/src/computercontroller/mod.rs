@@ -541,6 +541,41 @@ impl ComputerControllerServer {
         }
     }
 
+    fn validate_path(&self, path_str: &str) -> Result<PathBuf, ErrorData> {
+        let cache_dir = self.cache_dir.canonicalize().map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("Failed to canonicalize cache dir: {}", e),
+                None,
+            )
+        })?;
+
+        let path = PathBuf::from(path_str);
+        let absolute_path = if path.is_absolute() {
+            path
+        } else {
+            cache_dir.join(path)
+        };
+
+        let canonical_path = absolute_path.canonicalize().map_err(|e| {
+            ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                format!("Invalid path or file not found: {}", e),
+                None,
+            )
+        })?;
+
+        if canonical_path.starts_with(&cache_dir) {
+            Ok(canonical_path)
+        } else {
+            Err(ErrorData::new(
+                ErrorCode::INVALID_PARAMS,
+                "Access denied: Path is outside cache directory".to_string(),
+                None,
+            ))
+        }
+    }
+
     // Helper function to generate a cache file path
     fn get_cache_path(&self, prefix: &str, extension: &str) -> PathBuf {
         let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
@@ -1533,7 +1568,7 @@ impl ComputerControllerServer {
                 ))]))
             }
             CacheCommand::View => {
-                let path = path.ok_or_else(|| {
+                let path_str = path.ok_or_else(|| {
                     ErrorData::new(
                         ErrorCode::INVALID_PARAMS,
                         "Missing 'path' parameter for view".to_string(),
@@ -1541,7 +1576,9 @@ impl ComputerControllerServer {
                     )
                 })?;
 
-                let content = fs::read_to_string(path).map_err(|e| {
+                let path = self.validate_path(&path_str)?;
+
+                let content = fs::read_to_string(&path).map_err(|e| {
                     ErrorData::new(
                         ErrorCode::INTERNAL_ERROR,
                         format!("Failed to read file: {}", e),
@@ -1551,11 +1588,12 @@ impl ComputerControllerServer {
 
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Content of {}:\n\n{}",
-                    path, content
+                    path.display(),
+                    content
                 ))]))
             }
             CacheCommand::Delete => {
-                let path = path.ok_or_else(|| {
+                let path_str = path.ok_or_else(|| {
                     ErrorData::new(
                         ErrorCode::INVALID_PARAMS,
                         "Missing 'path' parameter for delete".to_string(),
@@ -1563,7 +1601,9 @@ impl ComputerControllerServer {
                     )
                 })?;
 
-                fs::remove_file(path).map_err(|e| {
+                let path = self.validate_path(&path_str)?;
+
+                fs::remove_file(&path).map_err(|e| {
                     ErrorData::new(
                         ErrorCode::INTERNAL_ERROR,
                         format!("Failed to delete file: {}", e),
@@ -1572,7 +1612,7 @@ impl ComputerControllerServer {
                 })?;
 
                 // Remove from active resources if present
-                if let Ok(url) = Url::from_file_path(path) {
+                if let Ok(url) = Url::from_file_path(&path) {
                     self.active_resources
                         .lock()
                         .unwrap()
@@ -1581,7 +1621,7 @@ impl ComputerControllerServer {
 
                 Ok(CallToolResult::success(vec![Content::text(format!(
                     "Deleted file: {}",
-                    path
+                    path.display()
                 ))]))
             }
             CacheCommand::Clear => {
@@ -1673,5 +1713,102 @@ impl ServerHandler for ComputerControllerServer {
         Ok(ReadResourceResult {
             contents: vec![resource.clone()],
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+    use tempfile::TempDir;
+
+    #[tokio::test]
+    async fn test_path_traversal_view() {
+        let server = ComputerControllerServer::new();
+        // Create a temp file outside the server's cache dir
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("secret.txt");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "SECRET CONTENT").unwrap();
+
+        // Try to access it via View command using absolute path
+        let params = CacheParams {
+            command: CacheCommand::View,
+            path: Some(file_path.to_string_lossy().to_string()),
+        };
+
+        // Call the tool directly
+        // We need to wrap params in Parameters
+        let result = server.cache(Parameters(params)).await;
+
+        match result {
+            Ok(res) => {
+                println!("Unexpected success: {:?}", res);
+                panic!("Vulnerability still present! Managed to read file outside cache dir.");
+            }
+            Err(e) => {
+                println!("Access denied as expected: {:?}", e);
+                assert!(e.message.contains("Access denied") || e.message.contains("Invalid path") || e.message.contains("not found"));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_valid_cache_access() {
+        let server = ComputerControllerServer::new();
+        // Create a file INSIDE the cache dir
+        // We can use save_to_cache or manually create it
+        let content = "Safe content";
+        let cache_path = server.save_to_cache(content.as_bytes(), "test", "txt").await.unwrap();
+
+        // Try to access it via View command
+        let params = CacheParams {
+            command: CacheCommand::View,
+            path: Some(cache_path.to_string_lossy().to_string()),
+        };
+
+        let result = server.cache(Parameters(params)).await;
+
+        match result {
+            Ok(res) => {
+                 let content_debug = format!("{:?}", &res.content[0]);
+                 assert!(content_debug.contains("Safe content"));
+            }
+            Err(e) => {
+                panic!("Failed to access valid cache file: {:?}", e);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_path_traversal_delete() {
+        let server = ComputerControllerServer::new();
+        // Create a temp file outside the server's cache dir
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("delete_me.txt");
+        let mut file = std::fs::File::create(&file_path).unwrap();
+        writeln!(file, "DELETE ME").unwrap();
+
+        // Try to delete it via Delete command using absolute path
+        let params = CacheParams {
+            command: CacheCommand::Delete,
+            path: Some(file_path.to_string_lossy().to_string()),
+        };
+
+        let result = server.cache(Parameters(params)).await;
+
+        match result {
+            Ok(res) => {
+                println!("Unexpected success: {:?}", res);
+                panic!("Vulnerability still present! Managed to delete file outside cache dir.");
+            }
+            Err(e) => {
+                println!("Access denied as expected: {:?}", e);
+                assert!(e.message.contains("Access denied") || e.message.contains("Invalid path") || e.message.contains("not found"));
+            }
+        }
+
+        // Ensure file still exists
+        assert!(file_path.exists());
     }
 }
