@@ -163,8 +163,11 @@ async def simple_port_scan_impl(target: str, start_port: int, end_port: int) -> 
     open_ports = []
     try:
         # Resolve target first to avoid repeated lookups
-        target_ip = socket.gethostbyname(target)
-    except socket.gaierror:
+        # Use getaddrinfo for non-blocking DNS resolution
+        loop = asyncio.get_running_loop()
+        addr_info = await loop.getaddrinfo(target, None, family=socket.AF_INET)
+        target_ip = addr_info[0][4][0]
+    except (socket.gaierror, IndexError):
         return [TextContent(type="text", text=f"Could not resolve hostname: {target}")]
 
     # Limit concurrency to avoid hitting file descriptor limits
